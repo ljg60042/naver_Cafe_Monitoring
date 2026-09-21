@@ -169,11 +169,15 @@ def extract_post_info(driver, url):
         except TimeoutException:
             log("  ⚠️  렌더링 대기 시간 초과")
 
-        # 디버그: 현재 URL + HTML 파일 저장
+        # 디버그: 현재 URL + HTML 파일 저장 (실패해도 추출 자체는 계속 진행)
         log(f"  [DEBUG] iframe 내부 URL: {driver.current_url}")
-        with open("debug_iframe.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        log("  [DEBUG] iframe 소스 → debug_iframe.html 저장")
+        try:
+            debug_path = os.path.join(get_app_dir(), "debug_iframe.html")
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            log(f"  [DEBUG] iframe 소스 → {debug_path} 저장")
+        except Exception as e:
+            log(f"  ⚠️  디버그 파일 저장 실패 (무시하고 진행): {e}")
 
         page_src = driver.page_source
         body_text = driver.find_element(By.TAG_NAME, "body").text
