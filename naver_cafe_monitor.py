@@ -10,6 +10,7 @@ Requirements:
 import time
 import re
 import os
+import sys
 from datetime import datetime
 import pandas as pd
 import tkinter as tk
@@ -25,79 +26,19 @@ from selenium.webdriver.chrome.service import Service
 DELAY = 2   # 페이지 간 대기 시간(초)
 
 
+def get_app_dir():
+    """실행 파일(exe) 기준 또는 스크립트 기준 폴더 경로 반환"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+NICKNAME_FILE = os.path.join(get_app_dir(), "nicknames.txt")
+
 
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
-
-def select_excel_file():
-    """탐색기에서 엑셀 파일 선택"""
-    root = tk.Tk()
-    root.withdraw()  # tkinter 기본 창 숨김
-    root.attributes("-topmost", True)
-    file_path = filedialog.askopenfilename(
-        title="엑셀 파일 선택",
-        filetypes=[("Excel 파일", "*.xlsx *.xls"), ("모든 파일", "*.*")]
-    )
-    root.destroy()
-    return file_path
-
-
-def show_progress_popup(total):
-    """추출중 팝업 - 점 애니메이션 + 진행 카운트"""
-    import threading
-
-    root = tk.Tk()
-    root.title("네이버 카페 데이터 추출")
-    root.geometry("340x110")
-    root.resizable(False, False)
-    root.attributes("-topmost", True)
-    root.update_idletasks()
-    x = (root.winfo_screenwidth() - 340) // 2
-    y = (root.winfo_screenheight() - 110) // 2
-    root.geometry(f"340x110+{x}+{y}")
-
-    label_main = tk.Label(root, text="네이버 카페 데이터 추출 중", font=("맑은 고딕", 12, "bold"))
-    label_main.pack(pady=(12, 4))
-    label_status = tk.Label(root, text="Chrome 드라이버 초기화 중...", font=("맑은 고딕", 10), fg="#333333")
-    label_status.pack()
-    label_progress = tk.Label(root, text=f"[0 / {total}]", font=("맑은 고딕", 11), fg="#555555")
-    label_progress.pack(pady=(4, 0))
-
-    dots = [0]
-    current = [0]
-    running = [True]
-    status = ["Chrome 드라이버 초기화 중..."]
-
-    def tick():
-        if not running[0]:
-            return
-        label_progress.config(text=f"[{current[0]} / {total}]")
-        if status[0]:
-            label_status.config(text=status[0])
-        root.update()
-        root.after(200, tick)
-
-    root.after(0, tick)
-    root._running = running
-    root._current = current
-    root._status = status
-    return root
-
-
-def select_save_path(default_name):
-    """저장 경로 선택 탐색기"""
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    save_path = filedialog.asksaveasfilename(
-        title="결과 파일 저장",
-        initialfile=default_name,
-        defaultextension=".xlsx",
-        filetypes=[("Excel 파일", "*.xlsx")]
-    )
-    root.destroy()
-    return save_path
 
 
 def setup_driver():
@@ -122,7 +63,7 @@ def setup_driver():
 
 
 def extract_post_info(driver, url):
-    result = {"author": "", "views": "", "comments": "", "likes": "", "note": "", "post_date": "", "cafe_name": "", "board_name": "", "title": ""}
+    result = {"author": "", "views": "", "comments": "", "likes": "", "note": "", "post_date": "", "cafe_name": "", "board_name": "", "title": "", "comments_list": []}
 
     # 카페 URL 로드
     MAX_RETRY = 3
@@ -329,6 +270,34 @@ def extract_post_info(driver, url):
             result["likes"] = 0
             log("  ⚠️  좋아요 추출 실패")
 
+        # ── 댓글 목록 (작성자 + 내용) ────────────────────────
+        log("  댓글 목록 추출 중...")
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.comment_list li.CommentItem"))
+            )
+        except TimeoutException:
+            pass  # 댓글이 없는 게시글일 수 있음
+
+        try:
+            comment_items = driver.find_elements(By.CSS_SELECTOR, "li.CommentItem")
+            comments_list = []
+            for item in comment_items:
+                try:
+                    nick = item.find_element(By.CSS_SELECTOR, "a.comment_nickname").text.strip()
+                except NoSuchElementException:
+                    nick = ""
+                try:
+                    comment_text = item.find_element(By.CSS_SELECTOR, ".comment_text_box").text.strip()
+                except NoSuchElementException:
+                    comment_text = ""
+                if nick:
+                    comments_list.append({"author": nick, "text": comment_text})
+            result["comments_list"] = comments_list
+            log(f"  댓글 {len(comments_list)}개 추출 (작성자: {[c['author'] for c in comments_list]})")
+        except Exception:
+            log("  ⚠️  댓글 목록 추출 실패")
+
         # 아무것도 못 가져왔으면 로그인 필요로 처리
         if not result["author"] and result["views"] == "" and result["comments"] == "" and not result["note"]:
             log("  🔒 데이터 추출 실패 → 로그인 필요로 처리")
@@ -341,8 +310,7 @@ def extract_post_info(driver, url):
         err = str(e)
         # alert 메시지 정제
         if "Alert Text:" in err:
-            import re as _re
-            m = _re.search(r"Alert Text: (.+?)(\n|Message:)", err)
+            m = re.search(r"Alert Text: (.+?)(\n|Message:)", err)
             alert_msg = m.group(1).strip() if m else "alert 오류"
             if "삭제" in alert_msg or "존재하지 않" in alert_msg:
                 result["note"] = "삭제된 게시글"
@@ -359,171 +327,356 @@ def extract_post_info(driver, url):
     return result
 
 
-def run():
-    log("=" * 50)
-    log("네이버 카페 모니터링 시작")
-    log("=" * 50)
+class NaverCafeMonitorApp:
+    """엑셀 파일 선택 → 모니터링 시작 버튼으로 동작하는 메인 UI"""
 
-    excel_path = select_excel_file()
-    if not excel_path:
-        log("파일을 선택하지 않았습니다. 종료합니다.")
-        return
+    def __init__(self):
+        self.excel_path = None
 
-    folder = os.path.dirname(excel_path)
-    base   = os.path.splitext(os.path.basename(excel_path))[0]
-    today  = datetime.now().strftime("%Y%m%d")
-    output_path = os.path.join(folder, f"{base}_{today}_result.xlsx")
+        self.root = tk.Tk()
+        self.root.title("네이버 카페 모니터링")
+        self.root.geometry("420x460")
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth() - 420) // 2
+        y = (self.root.winfo_screenheight() - 460) // 2
+        self.root.geometry(f"420x460+{x}+{y}")
 
-    log(f"파일: {excel_path}")
+        tk.Label(self.root, text="네이버 카페 모니터링", font=("맑은 고딕", 14, "bold")).pack(pady=(20, 15))
 
-    df = pd.read_excel(excel_path, dtype=str)
-    df.columns = df.columns.str.strip()
+        tk.Label(self.root, text="추적할 네이버 아이디(닉네임) 목록").pack()
 
-    for col in ["카페명", "게시판구분", "게시글", "게시일시", "데이터추출일시", "ID", "조회수", "댓글", "좋아요", "비고"]:
-        if col not in df.columns:
-            df[col] = ""
+        id_frame = tk.Frame(self.root)
+        id_frame.pack(pady=(5, 5))
+        self.id_var = tk.StringVar()
+        self.id_entry = tk.Entry(id_frame, textvariable=self.id_var, width=22)
+        self.id_entry.pack(side="left", padx=(0, 6))
+        self.id_entry.bind("<Return>", lambda e: self.add_nickname())
+        self.add_btn = tk.Button(id_frame, text="추가", width=6, command=self.add_nickname)
+        self.add_btn.pack(side="left")
 
-    import re as _re
-    URL_PATTERN = _re.compile(
-        r'^https?://(cafe\.naver\.com/|naver\.me/)\S+', _re.IGNORECASE
-    )
+        list_frame = tk.Frame(self.root)
+        list_frame.pack(pady=(0, 5))
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        self.nickname_listbox = tk.Listbox(list_frame, height=6, width=34, yscrollcommand=scrollbar.set)
+        self.nickname_listbox.pack(side="left")
+        scrollbar.config(command=self.nickname_listbox.yview)
 
-    valid_rows = []
-    invalid_count = 0
-    for idx, row in df.iterrows():
-        url = str(row.get("업로드 링크", "")).strip()
-        if url in ("", "nan"):
-            continue
-        if not URL_PATTERN.match(url):
-            log(f"  ⚠️  유효하지 않은 URL 스킵: {url}")
-            df.at[idx, "비고"] = "유효하지 않은 URL"
-            df.at[idx, "데이터추출일시"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            invalid_count += 1
-            continue
-        valid_rows.append((idx, row))
+        self.remove_btn = tk.Button(self.root, text="선택 삭제", width=12, command=self.remove_nickname)
+        self.remove_btn.pack(pady=(0, 12))
 
-    total = len(valid_rows)
-    log(f"총 {total}개 유효 URL 처리 시작 (무효 {invalid_count}개 스킵)")
-    log("-" * 50)
+        self.file_var = tk.StringVar(value="선택된 엑셀 파일이 없습니다")
+        tk.Label(self.root, textvariable=self.file_var, fg="#555555", wraplength=380, justify="center").pack(pady=(0, 10))
 
-    # 추출중 팝업 띄우기
-    popup = show_progress_popup(total)
+        self.select_file_btn = tk.Button(self.root, text="엑셀 파일 선택", width=22, command=self.select_file)
+        self.select_file_btn.pack(pady=5)
 
-    log("Chrome 드라이버 초기화 중...")
-    popup._status[0] = "Chrome 드라이버 초기화 중..."
-    try: popup.update()
-    except: pass
-    driver = setup_driver()
-    log("Chrome 드라이버 준비 완료")
-    popup._status[0] = "Chrome 드라이버 준비 완료"
-    try: popup.update()
-    except: pass
+        self.start_btn = tk.Button(
+            self.root, text="모니터링 시작", width=22, state="disabled",
+            bg="#4CAF50", fg="white", command=self.start_monitoring
+        )
+        self.start_btn.pack(pady=5)
 
-    try:
-        for count, (idx, row) in enumerate(valid_rows, 1):
-            url = str(row.get("업로드 링크", "")).strip()
-            log(f"[{count}/{total}] {url}")
-            popup._current[0] = count
-            popup._status[0] = f"접속 중: {url[:50]}..."
-            try:
-                popup.update()
-            except Exception:
-                pass
+        self.status_var = tk.StringVar(value="")
+        tk.Label(self.root, textvariable=self.status_var, fg="#333333", font=("맑은 고딕", 10)).pack(pady=(15, 0))
 
-            info = extract_post_info(driver, url)
+        self.progress_var = tk.StringVar(value="")
+        tk.Label(self.root, textvariable=self.progress_var, fg="#777777", font=("맑은 고딕", 10)).pack()
 
-            df.at[idx, "데이터추출일시"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            df.at[idx, "비고"]  = str(info["note"])
-            # 비고가 있으면(삭제/로그인필요 등) 나머지 컬럼은 빈값 유지
-            df.at[idx, "카페명"] = str(info["cafe_name"])
-            if not info["note"]:
-                df.at[idx, "게시판구분"] = str(info["board_name"])
-                df.at[idx, "게시글"] = str(info["title"])
-                df.at[idx, "게시일시"] = str(info["post_date"])
-                df.at[idx, "ID"]   = str(info["author"])
-                df.at[idx, "조회수"] = str(info["views"]) if info["views"] != "" else ""
-                df.at[idx, "댓글"]  = str(info["comments"]) if info["comments"] != "" else ""
-                df.at[idx, "좋아요"] = str(info["likes"]) if info["likes"] != "" else ""
+        self.load_nicknames()
 
-            if info["note"]:
-                log(f"  결과: {info['note']}")
-            else:
-                log(f"  결과: 글쓴이={info['author']} / 조회={info['views']} / 댓글={info['comments']}")
-            log("-" * 50)
+    def select_file(self):
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="엑셀 파일 선택",
+            filetypes=[("Excel 파일", "*.xlsx *.xls"), ("모든 파일", "*.*")]
+        )
+        if path:
+            self.excel_path = path
+            self.file_var.set(f"선택됨: {os.path.basename(path)}")
+            self.update_start_button_state()
 
-    finally:
-        driver.quit()
-        log("Chrome 드라이버 종료")
-        popup._running[0] = False
+    def add_nickname(self):
+        nickname = self.id_var.get().strip()
+        if not nickname:
+            return
+        existing = self.nickname_listbox.get(0, tk.END)
+        if nickname in existing:
+            messagebox.showinfo("알림", "이미 추가된 아이디입니다.", parent=self.root)
+            return
+        self.nickname_listbox.insert(tk.END, nickname)
+        self.id_var.set("")
+        self.update_start_button_state()
+        self.save_nicknames()
+
+    def remove_nickname(self):
+        selection = self.nickname_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("알림", "삭제할 아이디를 목록에서 선택해주세요.", parent=self.root)
+            return
+        for i in reversed(selection):
+            self.nickname_listbox.delete(i)
+        self.update_start_button_state()
+        self.save_nicknames()
+
+    def get_nickname_list(self):
+        return list(self.nickname_listbox.get(0, tk.END))
+
+    def load_nicknames(self):
+        """nicknames.txt에서 이전에 저장한 닉네임 목록을 불러옴"""
+        if not os.path.exists(NICKNAME_FILE):
+            return
         try:
-            popup.destroy()
-        except Exception:
-            pass
+            with open(NICKNAME_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    nick = line.strip()
+                    if nick:
+                        self.nickname_listbox.insert(tk.END, nick)
+            self.update_start_button_state()
+        except Exception as e:
+            log(f"⚠️  닉네임 파일 로드 실패: {e}")
 
-    # 컬럼 순서 재정렬
-    all_cols = df.columns.tolist()
-    ordered = ["업로드 링크", "카페명", "게시판구분", "게시글", "게시일시", "데이터추출일시", "ID", "조회수", "댓글", "좋아요", "비고"]
-    # 위 목록에 없는 나머지 컬럼은 뒤에 붙임
-    rest = [c for c in all_cols if c not in ordered]
-    final_cols = [c for c in ordered if c in all_cols] + rest
-    df = df[final_cols]
+    def save_nicknames(self):
+        """현재 닉네임 목록을 nicknames.txt에 저장"""
+        try:
+            with open(NICKNAME_FILE, "w", encoding="utf-8") as f:
+                for nick in self.nickname_listbox.get(0, tk.END):
+                    f.write(nick + "\n")
+        except Exception as e:
+            log(f"⚠️  닉네임 파일 저장 실패: {e}")
+            messagebox.showwarning("알림", f"닉네임 저장에 실패했습니다:\n{e}", parent=self.root)
 
-    # 엑셀 저장 불가 특수문자 제거
-    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-    def clean_cell(val):
-        if isinstance(val, str):
-            return ILLEGAL_CHARACTERS_RE.sub('', val)
-        return val
-    try:
-        df = df.map(clean_cell)
-    except AttributeError:
-        df = df.applymap(clean_cell)
+    def update_start_button_state(self):
+        if self.excel_path and self.nickname_listbox.size() > 0:
+            self.start_btn.config(state="normal")
+        else:
+            self.start_btn.config(state="disabled")
 
-    # 저장 경로 탐색기
-    today = datetime.now().strftime("%Y%m%d")
-    base  = os.path.splitext(os.path.basename(excel_path))[0]
-    default_name = f"{base}_{today}_result.xlsx"
-    save_path = select_save_path(default_name)
+    def set_controls_enabled(self, enabled):
+        """모니터링 진행 중에는 다른 입력/버튼을 잠가서 조작 못 하게 함"""
+        state = "normal" if enabled else "disabled"
+        self.id_entry.config(state=state)
+        self.add_btn.config(state=state)
+        self.remove_btn.config(state=state)
+        self.nickname_listbox.config(state=state)
+        self.select_file_btn.config(state=state)
 
-    if save_path:
-        # 엑셀 저장 + 컬럼 너비 자동 조정 + 줄바꿈
-        from openpyxl import load_workbook
-        from openpyxl.styles import Alignment
-        from openpyxl.utils import get_column_letter
+    def start_monitoring(self):
+        if not self.excel_path:
+            messagebox.showwarning("알림", "먼저 엑셀 파일을 선택해주세요.", parent=self.root)
+            return
+        if self.nickname_listbox.size() == 0:
+            messagebox.showwarning("알림", "네이버 아이디(닉네임)를 하나 이상 추가해주세요.", parent=self.root)
+            return
+        self.start_btn.config(state="disabled")
+        self.set_controls_enabled(False)
+        try:
+            self.run_monitoring()
+        except Exception as e:
+            log(f"❌ 모니터링 중 오류 발생: {e}")
+            messagebox.showerror("오류", f"모니터링 중 오류가 발생했습니다:\n{e}", parent=self.root)
+        finally:
+            self.set_controls_enabled(True)
+            self.update_start_button_state()
 
-        df.to_excel(save_path, index=False)
+    def run_monitoring(self):
+        excel_path = self.excel_path
+        target_ids = self.get_nickname_list()
+        folder = os.path.dirname(excel_path)
+        base = os.path.splitext(os.path.basename(excel_path))[0]
 
-        wb = load_workbook(save_path)
-        ws = wb.active
+        log("=" * 50)
+        log("네이버 카페 모니터링 시작")
+        log("=" * 50)
+        log(f"파일: {excel_path}")
+        log(f"대상 아이디 목록: {', '.join(target_ids)}")
 
-        # 헤더 회색 배경
-        from openpyxl.styles import PatternFill, Font
-        header_fill = PatternFill(start_color="BFBFBF", end_color="BFBFBF", fill_type="solid")
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        df = pd.read_excel(excel_path, dtype=str)
+        df.columns = df.columns.str.strip()
 
-        for col_idx, col in enumerate(ws.columns, 1):
-            max_len = 0
-            col_letter = get_column_letter(col_idx)
-            for cell in col:
-                try:
-                    cell_len = max(len(str(line)) for line in str(cell.value).split("\n")) if cell.value else 0
-                    max_len = max(max_len, cell_len)
-                except:
-                    pass
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+        for col in ["카페명", "게시판구분", "게시글", "게시일시", "데이터추출일시", "ID", "조회수", "댓글", "좋아요", "비고"]:
+            if col not in df.columns:
+                df[col] = ""
 
-        wb.save(save_path)
-        log(f"✅ 완료! 결과 저장: {save_path}")
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showinfo("네이버카페데이터 추출 완료", f"저장 위치:\n{save_path}")
-        root.destroy()
-    else:
-        log("저장 취소됨")
+        URL_PATTERN = re.compile(
+            r'^https?://(cafe\.naver\.com/|naver\.me/)\S+', re.IGNORECASE
+        )
+
+        valid_rows = []
+        invalid_count = 0
+        for idx, row in df.iterrows():
+            url = str(row.get("업로드 링크", "")).strip()
+            if url in ("", "nan"):
+                continue
+            if not URL_PATTERN.match(url):
+                log(f"  ⚠️  유효하지 않은 URL 스킵: {url}")
+                df.at[idx, "비고"] = "유효하지 않은 URL"
+                df.at[idx, "데이터추출일시"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                invalid_count += 1
+                continue
+            valid_rows.append((idx, row))
+
+        total = len(valid_rows)
+        log(f"총 {total}개 유효 URL 처리 시작 (무효 {invalid_count}개 스킵)")
+        log("-" * 50)
+
+        self.status_var.set("Chrome 드라이버 초기화 중...")
+        self.progress_var.set(f"[0 / {total}]")
+        self.root.update()
+
+        driver = setup_driver()
+        log("Chrome 드라이버 준비 완료")
+        self.status_var.set("Chrome 드라이버 준비 완료")
+        self.root.update()
+
+        comments_by_idx = {}  # idx -> 등록된 아이디가 작성한 댓글 목록 (행 분리용)
+
+        try:
+            for count, (idx, row) in enumerate(valid_rows, 1):
+                url = str(row.get("업로드 링크", "")).strip()
+                log(f"[{count}/{total}] {url}")
+                self.progress_var.set(f"[{count} / {total}]")
+                self.status_var.set(f"접속 중: {url[:40]}...")
+                self.root.update()
+
+                info = extract_post_info(driver, url)
+
+                df.at[idx, "데이터추출일시"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                df.at[idx, "비고"] = str(info["note"])
+                # 비고가 있으면(삭제/로그인필요 등) 나머지 컬럼은 빈값 유지
+                df.at[idx, "카페명"] = str(info["cafe_name"])
+                if not info["note"]:
+                    df.at[idx, "게시판구분"] = str(info["board_name"])
+                    df.at[idx, "게시글"] = str(info["title"])
+                    df.at[idx, "게시일시"] = str(info["post_date"])
+                    df.at[idx, "ID"] = str(info["author"])
+                    df.at[idx, "조회수"] = str(info["views"]) if info["views"] != "" else ""
+                    df.at[idx, "댓글"] = str(info["comments"]) if info["comments"] != "" else ""
+                    df.at[idx, "좋아요"] = str(info["likes"]) if info["likes"] != "" else ""
+
+                    matched_comments = [
+                        c for c in info["comments_list"]
+                        if c["author"] in target_ids and c["text"]
+                    ]
+                    if matched_comments:
+                        comments_by_idx[idx] = matched_comments
+
+                if info["note"]:
+                    log(f"  결과: {info['note']}")
+                else:
+                    log(f"  결과: 글쓴이={info['author']} / 조회={info['views']} / 댓글={info['comments']}")
+                log("-" * 50)
+        finally:
+            driver.quit()
+            log("Chrome 드라이버 종료")
+
+        # 댓글이 여러 개 일치하면 댓글 하나당 한 행으로 분리
+        output_records = []
+        for idx, row in df.iterrows():
+            row_dict = row.to_dict()
+            matched = comments_by_idx.get(idx, [])
+            if matched:
+                for i, c in enumerate(matched, 1):
+                    if i == 1:
+                        record = dict(row_dict)
+                    else:
+                        # 두 번째 행부터는 게시글 정보는 비우고 댓글 정보만 표시
+                        record = {col: "" for col in row_dict}
+                    record["댓글순번"] = i
+                    record["댓글닉네임"] = c["author"]
+                    record["댓글내용"] = c["text"]
+                    output_records.append(record)
+            else:
+                record = dict(row_dict)
+                record["댓글순번"] = ""
+                record["댓글닉네임"] = ""
+                record["댓글내용"] = ""
+                output_records.append(record)
+        df = pd.DataFrame(output_records)
+
+        # 컬럼 순서 재정렬
+        all_cols = df.columns.tolist()
+        ordered = ["업로드 링크", "카페명", "게시판구분", "게시글", "게시일시", "데이터추출일시", "ID", "조회수", "댓글", "좋아요", "댓글순번", "댓글닉네임", "댓글내용", "비고"]
+        rest = [c for c in all_cols if c not in ordered]
+        final_cols = [c for c in ordered if c in all_cols] + rest
+        df = df[final_cols]
+
+        # 엑셀 저장 불가 특수문자 제거
+        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+        def clean_cell(val):
+            if isinstance(val, str):
+                return ILLEGAL_CHARACTERS_RE.sub('', val)
+            return val
+        try:
+            df = df.map(clean_cell)
+        except AttributeError:
+            df = df.applymap(clean_cell)
+
+        # 저장 경로 탐색기
+        self.status_var.set("결과 저장 위치를 선택해주세요")
+        self.root.update()
+
+        today = datetime.now().strftime("%Y%m%d")
+        default_name = f"{base}_{today}_result.xlsx"
+        save_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="결과 파일 저장",
+            initialfile=default_name,
+            defaultextension=".xlsx",
+            filetypes=[("Excel 파일", "*.xlsx")]
+        )
+
+        if save_path:
+            # 엑셀 저장 + 컬럼 너비 자동 조정 + 줄바꿈
+            from openpyxl import load_workbook
+            from openpyxl.styles import Alignment, PatternFill, Font
+            from openpyxl.utils import get_column_letter
+
+            df.to_excel(save_path, index=False)
+
+            wb = load_workbook(save_path)
+            ws = wb.active
+
+            # 헤더 회색 배경
+            header_fill = PatternFill(start_color="BFBFBF", end_color="BFBFBF", fill_type="solid")
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            for col_idx, col in enumerate(ws.columns, 1):
+                max_len = 0
+                col_letter = get_column_letter(col_idx)
+                for cell in col:
+                    try:
+                        cell_len = max(len(str(line)) for line in str(cell.value).split("\n")) if cell.value else 0
+                        max_len = max(max_len, cell_len)
+                    except Exception:
+                        pass
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+            wb.save(save_path)
+            log(f"✅ 완료! 결과 저장: {save_path}")
+            self.status_var.set("완료!")
+            self.progress_var.set(f"저장 위치: {os.path.basename(save_path)}")
+            messagebox.showinfo("네이버카페데이터 추출 완료", f"저장 위치:\n{save_path}", parent=self.root)
+        else:
+            log("저장 취소됨")
+            self.status_var.set("저장 취소됨")
+
+        # 다음 모니터링을 위해 초기화 (아이디는 유지해서 다른 파일 이어서 확인 가능)
+        self.excel_path = None
+        self.file_var.set("선택된 엑셀 파일이 없습니다")
+        self.set_controls_enabled(True)
+        self.update_start_button_state()
+
+    def run(self):
+        self.root.mainloop()
+
 
 if __name__ == "__main__":
-    run()
+    app = NaverCafeMonitorApp()
+    app.run()
