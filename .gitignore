@@ -1,0 +1,17 @@
+# PyInstaller 빌드 산출물
+build/
+dist/
+
+# Python 캐시
+__pycache__/
+*.pyc
+
+# 디버그용 생성 파일
+debug_iframe.html
+
+# 가상환경
+venv/
+.venv/
+
+# OS/IDE
+.vscode/
