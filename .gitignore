@@ -9,6 +9,9 @@ __pycache__/
 # 디버그용 생성 파일
 debug_iframe.html
 
+# 사용자별 로컬 데이터
+nicknames.txt
+
 # 가상환경
 venv/
 .venv/
